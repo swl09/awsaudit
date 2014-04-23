@@ -17,6 +17,7 @@ s3bucket="adsk-eis-ea-audit"
 # Runtime Variables pulled from AWS data...
 ###
 instance=`wget -q -O - http://169.254.169.254/latest/meta-data/instance-id`
+region=`curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone | sed -e 's:\([0-9][0-9]*\)[a-z]*\$:\\1:'`
 objname=`aws iam list-account-aliases | head -3 | tail -1 | awk -F\" '{print $2}'`
 filename=/var/tmp/$objname
 
@@ -29,7 +30,7 @@ echo "\"account\": \"$objname\"," >> $filename
 
 dval=""
 
-for i in `aws --region us-east-1 ec2 describe-regions | grep RegionName | awk -F\" '{print $4}'`; do
+for i in `aws --region $region ec2 describe-regions | grep RegionName | awk -F\" '{print $4}'`; do
     if [ "$dval" != "" ]; then 
 	echo "," >>$filename
     fi
@@ -49,7 +50,8 @@ done
 echo "}" >> $filename
 
 
-aws s3api put-object --acl bucket-owner-full-control --bucket $bucket --key ${objname}.txt --body $filename
+aws s3api put-object --acl bucket-owner-full-control --bucket $s3bucket --key ${objname}.txt --body $filename
 #aws s3api put-object --bucket adsk-eis-ea-audit --key ${objname}.txt --body $filename
 
-echo "Right now, I would TOTALLY terminate $instance"
+echo "Terminating Instance ID $instance"
+aws --region=$region ec2 terminate-instances  --instance-ids $instance
