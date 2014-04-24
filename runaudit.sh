@@ -12,6 +12,7 @@
 # Configurables
 ###
 s3bucket="adsk-eis-ea-audit"
+s3keyhead="auditdata"
 
 ###
 # Runtime Variables pulled from AWS data...
@@ -50,8 +51,7 @@ done
 echo "}" >> $filename
 
 
-aws s3api put-object --acl bucket-owner-full-control --bucket $s3bucket --key ${objname}.txt --body $filename
-#aws s3api put-object --bucket adsk-eis-ea-audit --key ${objname}.txt --body $filename
+aws s3api put-object --acl bucket-owner-full-control --bucket $s3bucket --key $s3keyhead/${objname}.txt --body $filename
 
 echo "Terminating Instance ID $instance"
 aws --region=$region ec2 terminate-instances  --instance-ids $instance
