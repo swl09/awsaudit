@@ -1,0 +1,78 @@
+#!/usr/bin/perl
+#
+#
+#@accounts = (qw(128394829880 200688590816 313410768348 342978554958 396705024324
+#                453456364608 585300503087 861165369982 964355697993));
+@accounts = (qw( 396705024324 ));
+
+$pwd = `/bin/pwd`;
+chomp($pwd);
+#
+# Get the runaudit.sh script from github
+# 
+unlink "runaudit.sh";
+system "wget https://raw.githubusercontent.com/swl09/awsaudit/master/runaudit.sh";
+
+#
+# Get the current Region
+# 
+open(IN, "curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone|");
+$az = <IN>;
+close(IN);
+
+# Strip the AZ specifier to make the region.
+$az =~ s/[a-z]$//g;
+print "$az is AZ\n";
+
+# Set Default Region as env, since it won't change from account to account
+$ENV{'AWS_DEFAULT_REGION'} = $az;
+
+foreach $acct (@accounts) {
+    open(ROLEIN, "aws sts assume-role --role-arn  arn:aws:iam::396705024324:role/ea-audit --role-session-name ea-audit|");
+    $envstr = "";
+    while(<ROLEIN>) { 
+        chomp();
+        print "Role Output: $_\n";
+        if (/SessionToken|SecretAccessKey|AccessKeyId/) {
+	    s/SessionToken/AWS_SECURITY_TOKEN/;
+	    s/SecretAccessKey/AWS_SECRET_ACCESS_KEY/;
+	    s/AccessKeyId/AWS_ACCESS_KEY_ID/;
+	    my ($k, $v) = split(/:\s*/);
+	    $k =~ s/\s*"|"$|",$//g;
+	    $v =~ s/\s*"|,\s*$//g;
+	    # print "K - $k  V - $v\n";
+            # print "Injecting $k\n";
+	    # $ENV{$k} = $v;
+            $envstr .= "$k=$v ";
+        }
+
+    }
+
+
+#foreach $k (keys %ENV) {
+#    print "$k -> $ENV{$k}\n";
+#}
+
+    close(ROLEIN);
+
+
+#print "PWD: $pwd\n";
+#exit(0);
+    print "$envstr aws ec2 run-instances --image-id ami-fb8e9292 --user-data file://$pwd/runaudit.sh --instance-type t1.micro --count 1 --iam-instance-profile Name=ea-audit-local   \n";
+    open(AWSIN, "$envstr aws ec2 run-instances --image-id ami-fb8e9292 --user-data file://$pwd/runaudit.sh --instance-type t1.micro --count 1 --iam-instance-profile Name=ea-audit-local   |");
+    my $instance = "";
+    while(<AWSIN>) {
+        if (/"InstanceId": "([^"]+)"/) {
+	    $instance = $1;
+        }
+    }
+
+    close(AWSIN);
+    print "Created Instance $instance\n";
+
+    if ($instance ne '') {
+        print "$envstr aws ec2 create-tags --resources $instance --tags Key=lifecycle,Value=temp-ea-audit\n";
+        system "$envstr aws ec2 create-tags --resources $instance --tags Key=lifecycle,Value=temp-ea-audit >/dev/null 2>&1 ";
+        system "$envstr aws ec2 create-tags --resources $instance --tags Key=Name,Value=EA_AUDIT_TEMP >/dev/null 2>&1";
+    }
+}
