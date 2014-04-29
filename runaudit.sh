@@ -17,7 +17,7 @@ s3keyhead="auditdata"
 ###
 # Runtime Variables pulled from AWS data...
 ###
-instance=`wget -q -O - http://169.254.169.254/latest/meta-data/instance-id`
+#instance=`wget -q -O - http://169.254.169.254/latest/meta-data/instance-id`
 region=`curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone | sed -e 's:\([0-9][0-9]*\)[a-z]*\$:\\1:'`
 objname=`aws iam list-account-aliases | head -3 | tail -1 | awk -F\" '{print $2}'`
 filename=/var/tmp/$objname
@@ -53,5 +53,5 @@ echo "}" >> $filename
 
 aws s3api put-object --acl bucket-owner-full-control --bucket $s3bucket --key $s3keyhead/${objname}.txt --body $filename
 
-echo "Terminating Instance ID $instance"
-aws --region=$region ec2 terminate-instances  --instance-ids $instance
+#echo "Terminating Instance ID $instance"
+#aws --region=$region ec2 terminate-instances  --instance-ids $instance
