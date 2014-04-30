@@ -1,0 +1,76 @@
+#!/usr/bin/perl
+#
+#use JSON;
+#
+#
+#@accounts = (qw(128394829880 200688590816 313410768348 342978554958 396705024324
+#                453456364608 585300503087 861165369982 964355697993));
+#@accounts = (qw( 396705024324 ));
+@accounts = ();
+
+$pwd = `/bin/pwd`;
+chomp($pwd);
+#
+# Get the runaudit.sh script from github
+# 
+unlink "runaudit.sh";
+system "wget -q https://raw.githubusercontent.com/swl09/awsaudit/master/runaudit.sh";
+system "chmod 755 ./runaudit.sh";
+
+#
+# Get the current Region
+# 
+open(IN, "curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone|");
+$az = <IN>;
+close(IN);
+
+# Strip the AZ specifier to make the region.
+$az =~ s/[a-z]$//g;
+#print "$az is AZ\n";
+
+# Set Default Region as env, since it won't change from account to account
+$ENV{'AWS_DEFAULT_REGION'} = $az;
+
+open(ACCTIN, "aws dynamodb scan --table-name AWSAccounts|");
+while(<ACCTIN>) {
+    if (/"S":\s*"(\d+)"/) {
+	my $acct = $1;
+        push(@accounts, $acct) if ($acct ne '964355697993' && $acct ne '163390070011' && 
+		$acct ne '684169926614' && $acct ne '666900198896');
+	print "Account: $1\n";
+    }
+} 
+close(ACCTIN);
+
+system "aws sqs send-message --queue-url https://queue.amazonaws.com/964355697993/EA-Audit-Pipeline --message-body \"EA-Audit-Start\"";
+
+foreach $acct (@accounts) {
+    print "Running for Acct: $acct\n";
+    open(ROLEIN, "aws sts assume-role --role-arn  arn:aws:iam::${acct}:role/ea-audit --role-session-name ea-audit|");
+    $envstr = "";
+    while(<ROLEIN>) { 
+        chomp();
+        #print "Role Output: $_\n";
+        if (/SessionToken|SecretAccessKey|AccessKeyId/) {
+	    s/SessionToken/AWS_SECURITY_TOKEN/;
+	    s/SecretAccessKey/AWS_SECRET_ACCESS_KEY/;
+	    s/AccessKeyId/AWS_ACCESS_KEY_ID/;
+	    my ($k, $v) = split(/:\s*/);
+	    $k =~ s/\s*"|"$|",$//g;
+	    $v =~ s/\s*"|,\s*$//g;
+	    # print "K - $k  V - $v\n";
+            # print "Injecting $k\n";
+	    # $ENV{$k} = $v;
+            $envstr .= "$k=$v ";
+        }
+    }
+    close(ROLEIN);
+
+
+    print "$envstr ./runaudit.sh\n";
+    open(AWSIN, "$envstr ./runaudit.sh|");
+    while(<AWSIN>) { print; }
+    close(AWSIN);
+}
+
+system "aws  sqs send-message --queue-url https://queue.amazonaws.com/964355697993/EA-Audit-Pipeline --message-body \"EA-Audit-Complete\"";
