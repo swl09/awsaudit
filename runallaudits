@@ -2,10 +2,6 @@
 #
 #use JSON;
 #
-#
-#@accounts = (qw(128394829880 200688590816 313410768348 342978554958 396705024324
-#                453456364608 585300503087 861165369982 964355697993));
-#@accounts = (qw( 396705024324 ));
 @accounts = ();
 
 $pwd = `/bin/pwd`;
@@ -35,8 +31,7 @@ open(ACCTIN, "aws dynamodb scan --table-name AWSAccounts|");
 while(<ACCTIN>) {
     if (/"S":\s*"(\d+)"/) {
 	my $acct = $1;
-        push(@accounts, $acct) if ($acct ne '964355697993' && $acct ne '163390070011' && 
-		$acct ne '684169926614' && $acct ne '666900198896');
+        push(@accounts, $acct);
 	print "Account: $1\n";
     }
 } 
