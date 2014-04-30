@@ -1,0 +1,254 @@
+#!/opt/local/bin/perl
+
+##################################################
+# orchestrate-audit
+#
+# This script reads an Account XLSX, pops the accounts into DynamoDB, then spins up 
+# an instance under the "ea-audit-master" role with the runallaudits script as user data.
+# It waits for the instance to finish the audit (waiting for the appropriate message to 
+# be posted in SQS), then parses the results (from S3), finally terminating the instance 
+# it created.
+#
+# Written by Steven W. Litras, Copyright 2014 Autodesk, Inc.
+##################################################
+
+use Net::Amazon::DynamoDB;
+use Spreadsheet::XLSX;
+use Data::Dumper;
+
+####
+# Configurables
+####
+# Location of the XLSX file
+my $pathtofile = "/Users/swlroot/Box Sync/Billing/EIS_AWS_Accounts.xlsx";
+# Cost Ctrs to look for on AWS accounts (e.g. only looking at the accounts bound to EA)
+my @costctrs = (qw( 3000300045 3000300057 ));
+# Accounts to specifically ignore. 
+my @acctignore = (qw( 964355697993 163390070011 684169926614 666900198896 ));
+# File to write all the processed audit info to
+my $outfile = "audit-results.csv";
+
+####
+# Don't tweak anything below here unless you know what you're doing
+####
+die "Need AWS Environment Variables Set to Run\n" if ($ENV{'AWS_ACCESS_KEY_ID'} eq '' or $ENV{'AWS_SECRET_ACCESS_KEY'} eq '' or $ENV{'AWS_DEFAULT_REGION'} eq '');
+
+my $pwd =  `/bin/pwd`;
+chomp($pwd);
+
+####
+# Unbuffer output...
+####
+$|++;
+
+
+####
+# Connect to our DynamoDB Instance, just the AWSAccounts Table
+####
+my $ddb = Net::Amazon::DynamoDB->new(
+        access_key => $ENV{'AWS_ACCESS_KEY_ID'},
+        secret_key => $ENV{'AWS_SECRET_ACCESS_KEY'},
+        tables     => {
+            
+            # table with only hash key
+            AWSAccounts => {
+                hash_key   => 'AccountID',
+                attributes => {
+                    AccountID  => 'S',
+                    AccountName => 'S',
+                }
+            },
+            
+          
+        }
+    );
+
+####
+# There's probably a better way to do this, but this pretty much deletes all the data in the table
+# (so it can be reconstructed from the XLSX file, which is authoritative)
+####
+foreach $item ($ddb->scan_items("AWSAccounts")) {
+	if (ref($item) eq 'ARRAY') {
+		foreach $nitem (@$item) {
+            $ddb->delete_item ("AWSAccounts", $nitem) or die $ddb->error;
+        }
+    }
+}
+
+####
+# Read the XLSX file, and Populate DynamoDB Table with the appropriate account data...
+####
+my $excel = Spreadsheet::XLSX->new ($pathtofile);
+ 
+my $sheet = $excel->worksheet("Account Detail");
+
+#printf("Sheet: %s\n", $sheet->{Name});
+
+print "Will run audit on the following accounts:\n";        
+        
+foreach my $row (2 .. $sheet->{MaxRow}) {
+         
+    #$sheet -> {MaxCol} ||= $sheet -> {MinCol};
+    my $acctname = $sheet->get_cell($row, 2);
+    print "acctname bad\n", next if (!defined($acctname));
+    my $acctid = $sheet->get_cell($row,3);
+    my $acctcostctr = $sheet->get_cell($row,6);
+ 
+    $acctval = $acctcostctr->value();
+    my @tmpcctr = grep(/$acctval/, @costctrs);
+    next if $#tmpcctr < 0;
+    #next if $acctcostctr->value() !~ /3000300045|3000300057/;
+
+
+    ####
+    # Ignore any account specified in @acctignore
+    ####
+    my $acctidnum = int($acctid->value());
+    my @tmpacctig = grep(/$acctidnum/, @acctignore);
+    next if $#tmpacctig >= 0;
+    #next if $acctidnum =~ /964355697993|163390070011|684169926614|666900198896/;
+
+    print $acctidnum, "/", $acctname->value() , "\n";
+    $ddb->put_item( AWSAccounts => {
+        AccountID   => $acctidnum,
+        AccountName => $acctname->value()
+    } ) or die $ddb->error;
+
+    #if ($cell) {
+     #   printf("( %s , %s ) => %s\n", $row, $col, $cell -> {Val});
+    #}
+ 
+}
+
+#system "$envstr aws ec2 run-instances --image-id ami-fb8e9292 --user-data file://$pwd/runallaudits --instance-type t1.micro --count 1 --iam-instance-profile Name=ea-audit-master";
+
+#
+# Kick off and tag the instance to run the audit
+#
+print "\nSpawning the instance to run the audit... - a run takes 5-10 minutes...\n";
+$debug && print "$envstr aws ec2 run-instances --image-id ami-fb8e9292 --user-data file://$pwd/runallaudits --instance-type t1.micro --count 1 --iam-instance-profile Name=ea-audit-master   \n";
+open(AWSIN, "$envstr aws ec2 run-instances --image-id ami-fb8e9292 --user-data file://$pwd/runallaudits --instance-type t1.micro --count 1 --iam-instance-profile Name=ea-audit-master   |");
+my $instance = "";
+while(<AWSIN>) {
+    if (/"InstanceId": "([^"]+)"/) {
+        $instance = $1;
+    }
+}
+
+close(AWSIN);
+print "Created Instance $instance\n";
+
+if ($instance ne '') {
+#    print "$envstr aws ec2 create-tags --resources $instance --tags Key=lifecycle,Value=temp-ea-audit\n";
+    system "$envstr aws ec2 create-tags --resources $instance --tags Key=lifecycle,Value=temp-ea-audit >/dev/null 2>&1 ";
+    system "$envstr aws ec2 create-tags --resources $instance --tags Key=Name,Value=EA_AUDIT_TEMP >/dev/null 2>&1";
+    print "Tagged Instance $instance\n";
+
+}
+
+
+my $tmpfile = "/tmp/objfile$$";
+my $breakloop=0;
+
+
+
+
+print "Waiting for the Audit Script to run on the instance...\n";
+while(1) {
+    my @cms = ();
+    open(IN, "aws --region us-east-1 sqs receive-message --queue-url https://queue.amazonaws.com/964355697993/EA-Audit-Pipeline|");
+    while(<IN>){
+	if (m{"ReceiptHandle":\s*"([^"]+)"}) {
+	    my $rhan = $1;
+            push(@cms, "aws --region us-east-1 sqs delete-message --queue-url https://queue.amazonaws.com/964355697993/EA-Audit-Pipeline --receipt-handle $rhan");
+        }
+	if (/EA-Audit-Start/) {
+	    print "The Instance has started the audit process - waiting for completion\n";
+	    $breakloop = 0;
+	}
+	if (/EA-Audit-Complete/) {
+	    print "Audit reports completion, Retreiving Data\n";
+	    $breakloop = 1;
+	}
+    }
+    close(IN);
+
+    #####
+    # Process any deletes...
+    #####
+    foreach $cmd (@cms) {
+        $debug && print "Run $cmd\n";
+        system "$cmd";
+    }
+
+    #####
+    # If we've found the Audit complete, kick out of the loop...
+    #####
+    last if ($breakloop == 1);
+    
+    #####
+    # Otherwise, sleep for 60 seconds, but print out "." every 10 seconds to let the user know
+    # it's not hung...
+    #####
+    for (my $x = 0; $x < 6; $x++) {
+        print ".";
+        sleep(10);
+    }
+    
+}
+
+#####
+# Get a list of all the keys in the S3 bucket
+#####
+open(IN, "aws s3api list-objects --bucket adsk-eis-ea-audit|");
+while(<IN>) {
+    if (/"Key":\s+"([^"]+)"/) {
+	my $k = $1;
+	push(@objs, $k);
+
+    }
+
+}
+close(IN);
+#####
+# Grab each object, and parse out (bruteforce) all IP addresses - outputting account and IP in CSV format.
+#####
+open(OUT, ">$outfile");
+print OUT "Account,IP\n";
+foreach $k (@objs) {
+    my %ips=();
+    $acct = (split(/\//, $k, 2))[1];
+    $acct =~ s/.txt//g;
+    #print "Account: $k\n";
+    #print "aws s3api get-object --bucket adsk-eis-ea-audit --key $k $tmpfile \n";
+    system "aws s3api get-object --bucket adsk-eis-ea-audit --key $k $tmpfile 2>&1 >/dev/null";
+    open (IN, $tmpfile);
+    while(<IN>) {
+	#print "IP: $_" if (/Ip/);
+	#print "FILELN: $_";
+        if (m{(\d+\.\d+\.\d+\.\d+)}){
+	    my $ip = $1;
+	    $ips{$ip}++;
+	}
+
+    }
+    close(IN);
+    unlink($tmpfile);
+    foreach $ip (sort keys %ips) {
+	print OUT "$acct,$ip\n";
+    }
+}
+
+close(OUT);
+print "Finished - wrote $outfile\n";
+
+# Clean up the instance
+print "Terminating Instance ID $instance\n";
+system "aws ec2 terminate-instances  --instance-ids $instance 2>&1 >/dev/null";
+print "All Done.\n";
+exit 0;
+
+
+ 
+ 
+   
