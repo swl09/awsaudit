@@ -246,6 +246,8 @@ print "Finished - wrote $outfile\n";
 print "Terminating Instance ID $instance\n";
 system "aws ec2 terminate-instances  --instance-ids $instance 2>&1 >/dev/null";
 print "All Done.\n";
+
+# Exit Properly.
 exit 0;
 
 
